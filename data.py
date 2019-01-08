@@ -12,13 +12,13 @@ class Dataset(Dataset):
             if folder == phase + '_A':
                 self.datapath_A = []
                 for filename in os.listdir(os.path.join(dataset_name, folder)):
-                    self.datapath_A.append(os.listdir(os.path.join(dataset_name, folder, filename)))
+                    self.datapath_A.append(os.path.join(dataset_name, folder, filename))
             elif folder == phase + '_B':
                 self.datapath_B = []
                 for filename in os.listdir(os.path.join(dataset_name, folder)):
-                    self.datapath_B.append(os.listdir(os.path.join(dataset_name, folder, filename)))
-            else:
-                raise ValueError("dataset only contains train_A, train_B, test_A, test_B")
+                    self.datapath_B.append(os.path.join(dataset_name, folder, filename))
+            # else:
+            #     raise ValueError("dataset only contains train_A, train_B, test_A, test_B")
         self.augment = augment
         self.phase = phase
         self.img_size = img_size
@@ -30,6 +30,7 @@ class Dataset(Dataset):
     def __getitem__(self, item):
         image_A = io.imread(self.datapath_A[item])
         image_B = io.imread(self.datapath_B[item])
+
         if self.augment is not None:
             image_A = self.crop_or_resize(image_A)
             image_B = self.crop_or_resize(image_B)
@@ -40,11 +41,11 @@ class Dataset(Dataset):
         # rgb to lab  image_A is gray
         image_B = color.rgb2lab(image_B)
         # to [-1, 1]
-        re_A = (image_A / 128.0) - 1.0
-        re_L = (image_B[0:1, :, :] / 50) - 1.0
-        re_ab = (image_B[1:, :, :] / 110)
+        re_A = ((image_A / 128.0) - 1.0)[np.newaxis, :, :].astype(np.float32)
+        re_L = ((image_B[:, :, 0:1] / 50) - 1.0).transpose(2, 0, 1).astype(np.float32)
+        re_ab = (image_B[:, :, 1:] / 110).transpose(2, 0, 1).astype(np.float32)
         re_B = np.concatenate((re_L, re_ab), axis=0)
-        return {'A': re_A, 'B': re_B}
+        return {'A': re_L, 'B': re_ab}
 
     def crop_or_resize(self, image):
         augment_type = self.augment
@@ -92,6 +93,7 @@ def data_loader(dataset_name, augment, batchsize, phase='train', img_size=256, f
     dataloader = DataLoader(dataset,
                             batch_size=batchsize,
                             shuffle=True)
+    # return dataloader
     for i, data in enumerate(dataloader):
         if i*batchsize >= len(dataset):
             break

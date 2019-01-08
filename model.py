@@ -63,6 +63,28 @@ class LambdaLR():
         return 1.0 - max(0, epoch + self.offset - self.decay_start_epoch)/(self.n_epochs - self.decay_start_epoch)
 
 
+class Discriminatorbuffer(object):
+    def __init__(self, maxsize=50):
+        self.maxsize = maxsize
+        self.data = []
+
+    def push_and_pop(self, inputs):
+        to_return = []
+        for elements in inputs.data:
+            elements = torch.unsqueeze(elements, 0)
+            if len(self.data) < self.maxsize:
+                self.data.append(elements)
+                to_return.append(elements)
+            else:
+                if np.random.uniform(0,1) > 0.5:
+                    index = np.random.randint(low=0, high=self.maxsize)
+                    to_return.append(self.data[index].clone())  # deep copy
+                    self.data[index] = elements
+                else:
+                    to_return.append(elements)
+        return torch.cat(to_return)
+
+
 #################
 # generator
 #################
@@ -174,6 +196,7 @@ class Model(object):
         # to device
         if opt.device == 'gpu':
             device = torch.device("cuda:0")
+            self.device = device
             self.criterion_GAN.to(device)
             self.criterion_cycle.to(device)
             self.criterion_identity.to(device)
@@ -182,7 +205,7 @@ class Model(object):
             self.D_A.to(device)
             self.D_B.to(device)
 
-        if opt.isTrainning and (not opt.continue_train):
+        if opt.isTraining and (not opt.continue_train):
             # initialize models
             init_weight(self.G_AB, init_type=opt.initial)
             init_weight(self.G_BA, init_type=opt.initial)
@@ -203,20 +226,117 @@ class Model(object):
         self.lr_scheduler_D_A = torch.optim.lr_scheduler.LambdaLR(self.optimize_D_A, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step)
         self.lr_scheduler_D_B = torch.optim.lr_scheduler.LambdaLR(self.optimize_D_B, lr_lambda=LambdaLR(opt.n_epochs, opt.epoch, opt.decay_epoch).step)
 
-    def set_input(self):
-        pass
+        self.buffer_D_A = Discriminatorbuffer(maxsize=50)
+        self.buffer_D_B = Discriminatorbuffer(maxsize=50)
+
+        self.opt = opt
+
+    def set_input(self, batch):
+        self.real_A = batch['A'].to(self.device)
+        self.real_B = batch['B'].to(self.device)
 
     def forward(self):
-        pass
+        self.fake_B = self.G_AB.forward(self.real_A)
+        self.fake_A = self.G_BA.forward(self.real_B)
+        self.ret_A = self.G_BA.forward(self.fake_B)
+        self.ret_B = self.G_AB.forward(self.fake_A)
+
+    def expand_target(self, shape, flags=True):
+        if flags:
+            return torch.ones(*shape).to(self.device)
+        else:
+            return torch.zeros(*shape).to(self.device)
 
     def backward_G(self):
-        pass
+        # gan loss
+        score_AB = self.D_B.forward(self.fake_B)
+        score_BA = self.D_A.forward(self.fake_A)
+        if score_AB.shape != score_BA.shape:
+            raise NotImplementedError("the shape of D(B) and D(A) should be same")
+        shape = list(score_AB.shape)
+        loss_G_AB = self.criterion_GAN(score_AB, self.expand_target(shape, True))
+        loss_G_BA = self.criterion_GAN(score_BA, self.expand_target(shape, True))
+        self.loss_GAN = (loss_G_AB + loss_G_BA) / 2.0
+
+        # cycle loss
+        loss_cycle_A = self.criterion_cycle(self.ret_A, self.real_A)
+        loss_cycle_B = self.criterion_cycle(self.ret_B, self.real_B)
+        self.loss_cycle = (loss_cycle_A + loss_cycle_B) / 2.0
+
+        # total loss
+        self.loss_G = self.loss_GAN + self.loss_cycle
+        self.loss_G.backward()
 
     def backward_D_A(self):
-        pass
+        score_real = self.D_A.forward(self.real_A)
+        fake_A_ = self.buffer_D_A.push_and_pop(self.fake_A)
+        score_fake = self.D_A.forward(fake_A_.detach())
+        if score_real.shape != score_fake.shape:
+            raise NotImplementedError("the shape of D_A(real_img) and D_A(fake_img) should be same")
+        shape = list(score_real.shape)
+        loss_real = self.criterion_GAN(score_real, self.expand_target(shape, True))
+        loss_fake = self.criterion_GAN(score_fake, self.expand_target(shape, False))
+
+        self.loss_D_A = (loss_real + loss_fake) / 2.0
+        self.loss_D_A.backward()
 
     def backward_D_B(self):
-        pass
+        score_real = self.D_B.forward(self.real_B)
+        fake_B_ = self.buffer_D_B.push_and_pop(self.fake_B)
+        score_fake = self.D_B.forward(fake_B_.detach())
+        if score_real.shape != score_fake.shape:
+            raise NotImplementedError("the shape of D_B(real_img) and D_B(fake_img) should be same")
+        shape = list(score_real.shape)
+        loss_real = self.criterion_GAN(score_real, self.expand_target(shape, True))
+        loss_fake = self.criterion_GAN(score_fake, self.expand_target(shape, False))
+
+        self.loss_D_B = (loss_real + loss_fake) / 2.0
+        self.loss_D_B.backward()
 
     def optimize_params(self):
-        pass
+        # forward
+        self.forward()
+        # update G
+        self.optimize_G.zero_grad()
+        self.set_requires_grad([self.D_A, self.D_B], False)
+        self.backward_G()
+        self.optimize_G.step()
+
+        # update D_A
+        self.optimize_D_A.zero_grad()
+        self.set_requires_grad([self.D_A, self.D_B], True)
+        self.backward_D_A()
+        self.optimize_D_A.step()
+        # update D_B
+        self.optimize_D_B.zero_grad()
+        self.backward_D_B()
+        self.optimize_D_B.step()
+
+        # Update learning rates
+        self.lr_scheduler_G.step()
+        self.lr_scheduler_D_A.step()
+        self.lr_scheduler_D_B.step()
+
+    def set_requires_grad(self, nets, requires_grad=False):
+        """Set requies_grad=Fasle for all the networks to avoid computation"""
+        if not isinstance(nets, list):
+            nets = [nets]
+        for net in nets:
+            if net is not None:
+                for param in net.parameters():
+                    param.requires_grad = requires_grad
+
+    def save_network(self):
+        # save models to disk
+        path = self.opt.checkpoint
+        torch.save(self.G_AB, path + '/G_AB.pth')
+        torch.save(self.G_BA, path + '/G_BA.pth')
+        torch.save(self.D_A, path + '/D_A.pth')
+        torch.save(self.D_B, path + '/D_B.pth')
+
+    def sample_image(self):
+        path = self.opt.checkpoint + '/sample/'
+        fake_A_img = self.fake_A.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)
+        fake_B_img = self.fake_B.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)
+        ret_A_img = self.ret_A.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)
+        ret_B_img = self.ret_B.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)
