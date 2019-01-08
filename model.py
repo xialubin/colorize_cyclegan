@@ -5,6 +5,7 @@ import torch.nn.init as init
 import torch
 import functools
 import itertools
+from skimage import io, color
 
 
 def init_weight(net, init_type='normal', gain=0.02):
@@ -334,9 +335,32 @@ class Model(object):
         torch.save(self.D_A, path + '/D_A.pth')
         torch.save(self.D_B, path + '/D_B.pth')
 
-    def sample_image(self):
+    def sample_image(self, num):
         path = self.opt.checkpoint + '/sample/'
-        fake_A_img = self.fake_A.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)
-        fake_B_img = self.fake_B.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)
-        ret_A_img = self.ret_A.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)
-        ret_B_img = self.ret_B.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)
+        fake_A_L = self.fake_A.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)  # 用颜色预测亮度
+        fake_B_ab = self.fake_B.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)  # 用亮度预测颜色
+        ret_A_L = self.ret_A.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)  # 用亮度预测颜色，再从这个颜色预测亮度
+        ret_B_ab = self.ret_B.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)  # 用颜色预测亮度，再从这个亮度预测颜色
+
+        real_A_L = self.real_A.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)
+        real_B_ab = self.real_B.to("cpu").data.numpy()[0, :, :, :].transpose(1, 2, 0)
+
+        fake_A_img = self.to_image(np.concatenate((fake_A_L, real_B_ab), axis=2))
+        fake_B_img = self.to_image(np.concatenate((real_A_L, fake_B_ab), axis=2))
+        ret_A_img = self.to_image(np.concatenate((ret_A_L, real_B_ab), axis=2))
+        ret_B_img = self.to_image(np.concatenate((real_A_L, ret_B_ab), axis=2))
+
+        io.imsave(fake_A_img, path + 'fake_A/' + 'fake_A_' + str(num) + '.jpg')
+        io.imsave(fake_B_img, path + 'fake_B/' + 'fake_B_' + str(num) + '.jpg')
+        io.imsave(ret_A_img, path + 'ret_A/' + 'ret_A_' + str(num) + '.jpg')
+        io.imsave(ret_B_img, path + 'ret_B/' + 'ret_B_' + str(num) + '.jpg')
+
+    def to_image(self, img):
+        L = img[:, :, 0:1]
+        ab = img[:, :, 1:]
+
+        L = (L + 1.0) * 50.0
+        ab = ab * 110
+        Lab = np.concatenate((L, ab), axis=2)
+        RGB = (color.lab2rgb(Lab)*255).astype(np.uint8)
+        return RGB
